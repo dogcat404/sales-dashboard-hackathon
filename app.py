@@ -3,46 +3,127 @@ import pandas as pd
 import plotly.express as px
 from itertools import combinations
 from collections import Counter
+from pathlib import Path
 
+# =========================
+# KONFIGURASI HALAMAN
+# =========================
 st.set_page_config(
     page_title="Sales Intelligence Dashboard",
     page_icon="📊",
     layout="wide"
 )
 
+# =========================
+# FUNGSI FORMAT RUPIAH
+# =========================
+def rupiah(value):
+    return f"Rp{value:,.0f}".replace(",", ".")
+
+
+# =========================
+# FUNGSI LOAD DATA
+# =========================
 @st.cache_data
 def load_data(uploaded_file=None):
+    """
+    Fungsi ini membaca data dari:
+    1. File yang di-upload lewat sidebar Streamlit, atau
+    2. File data_penjualan.xlsx yang ada di repository GitHub.
+    """
+
     if uploaded_file is not None:
         df = pd.read_excel(uploaded_file)
     else:
-        df = pd.read_excel("data_penjualan.xlsx")
+        # Path aman untuk Streamlit Cloud
+        data_path = Path(__file__).parent / "data_penjualan.xlsx"
+
+        if not data_path.exists():
+            raise FileNotFoundError(
+                f"File data_penjualan.xlsx tidak ditemukan di lokasi: {data_path}"
+            )
+
+        df = pd.read_excel(data_path)
+
+    # Bersihkan nama kolom jika ada spasi tidak sengaja
+    df.columns = df.columns.str.strip()
+
+    # Pastikan kolom wajib tersedia
+    required_columns = [
+        "nomor_struk",
+        "tgl_transaksi",
+        "kode_produk",
+        "nama_produk",
+        "jumlah_terjual",
+        "harga",
+        "total_nilai"
+    ]
+
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        raise ValueError(f"Kolom berikut tidak ditemukan: {missing_columns}")
 
     # Konversi tanggal serial Excel menjadi tanggal normal
-    df["tanggal"] = pd.to_datetime(df["tgl_transaksi"], unit="D", origin="1899-12-30")
+    df["tanggal"] = pd.to_datetime(
+        df["tgl_transaksi"],
+        unit="D",
+        origin="1899-12-30",
+        errors="coerce"
+    )
 
-    # Fitur tambahan
+    # Hapus baris jika tanggal gagal terbaca
+    df = df.dropna(subset=["tanggal"])
+
+    # Pastikan kolom numerik benar
+    numeric_columns = ["jumlah_terjual", "harga", "total_nilai"]
+
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=numeric_columns)
+
+    # Fitur tambahan waktu
     df["bulan"] = df["tanggal"].dt.to_period("M").astype(str)
     df["nama_hari"] = df["tanggal"].dt.day_name()
     df["tanggal_str"] = df["tanggal"].dt.strftime("%Y-%m-%d")
 
     return df
 
+
+# =========================
+# HEADER DASHBOARD
+# =========================
 st.title("📊 Sales Intelligence Dashboard")
 st.caption("Dashboard visualisasi data penjualan untuk hackathon berbasis Python dan Streamlit.")
 
-st.sidebar.header("Upload Data")
+# =========================
+# SIDEBAR
+# =========================
+st.sidebar.header("Pengaturan Data")
+
 uploaded_file = st.sidebar.file_uploader(
     "Upload file Excel data_penjualan.xlsx",
     type=["xlsx"]
 )
 
+# =========================
+# LOAD DATA
+# =========================
 try:
     df = load_data(uploaded_file)
 except Exception as e:
-    st.error("Data belum ditemukan. Upload file Excel melalui sidebar atau simpan data_penjualan.xlsx di repository GitHub.")
+    st.error("Data belum ditemukan atau gagal dibaca.")
+    st.warning(
+        "Pastikan file bernama **data_penjualan.xlsx** sudah ada di repository GitHub "
+        "dan posisinya sejajar dengan file **app.py**."
+    )
+    st.code(str(e))
     st.stop()
 
-# Filter tanggal
+# =========================
+# FILTER TANGGAL
+# =========================
 min_date = df["tanggal"].min().date()
 max_date = df["tanggal"].max().date()
 
@@ -55,9 +136,18 @@ date_range = st.sidebar.date_input(
 
 if isinstance(date_range, tuple) and len(date_range) == 2:
     start_date, end_date = date_range
-    df = df[(df["tanggal"].dt.date >= start_date) & (df["tanggal"].dt.date <= end_date)]
+    df = df[
+        (df["tanggal"].dt.date >= start_date) &
+        (df["tanggal"].dt.date <= end_date)
+    ]
 
-# KPI transaksi
+if df.empty:
+    st.warning("Tidak ada data pada rentang tanggal yang dipilih.")
+    st.stop()
+
+# =========================
+# KPI TRANSAKSI
+# =========================
 trx = df.groupby("nomor_struk").agg(
     basket_value=("total_nilai", "sum"),
     item_unik=("kode_produk", "nunique"),
@@ -71,15 +161,18 @@ jumlah_produk = df["kode_produk"].nunique()
 aov = trx["basket_value"].mean() if len(trx) else 0
 
 col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Total Revenue", f"Rp{total_revenue:,.0f}".replace(",", "."))
+
+col1.metric("Total Revenue", rupiah(total_revenue))
 col2.metric("Total Qty", f"{total_qty:,.0f}".replace(",", "."))
 col3.metric("Transaksi", f"{jumlah_transaksi:,.0f}".replace(",", "."))
 col4.metric("Produk Unik", f"{jumlah_produk:,.0f}".replace(",", "."))
-col5.metric("AOV", f"Rp{aov:,.0f}".replace(",", "."))
+col5.metric("AOV", rupiah(aov))
 
 st.divider()
 
-# Agregasi produk
+# =========================
+# AGREGASI PRODUK
+# =========================
 top_produk = df.groupby(["kode_produk", "nama_produk"], as_index=False).agg(
     revenue=("total_nilai", "sum"),
     qty=("jumlah_terjual", "sum"),
@@ -87,13 +180,18 @@ top_produk = df.groupby(["kode_produk", "nama_produk"], as_index=False).agg(
     harga_rata2=("harga", "mean")
 ).sort_values("revenue", ascending=False)
 
-# Agregasi harian
+# =========================
+# AGREGASI HARIAN
+# =========================
 daily = df.groupby("tanggal", as_index=False).agg(
     revenue=("total_nilai", "sum"),
     qty=("jumlah_terjual", "sum"),
     transaksi=("nomor_struk", "nunique")
 )
 
+# =========================
+# TAB DASHBOARD
+# =========================
 tab1, tab2, tab3, tab4 = st.tabs([
     "Overview",
     "Produk",
@@ -101,8 +199,12 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "Market Basket"
 ])
 
+# =========================
+# TAB 1: OVERVIEW
+# =========================
 with tab1:
     st.subheader("Tren Revenue Harian")
+
     fig_daily = px.line(
         daily,
         x="tanggal",
@@ -110,42 +212,86 @@ with tab1:
         markers=True,
         title="Tren Revenue Harian"
     )
+
+    fig_daily.update_layout(
+        xaxis_title="Tanggal",
+        yaxis_title="Revenue"
+    )
+
     st.plotly_chart(fig_daily, use_container_width=True)
 
     col_a, col_b = st.columns(2)
 
     with col_a:
-        st.subheader("Revenue per Hari")
+        st.subheader("Revenue Berdasarkan Hari")
+
         weekday = df.groupby("nama_hari", as_index=False).agg(
             revenue=("total_nilai", "sum"),
             transaksi=("nomor_struk", "nunique")
         )
-        order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-        weekday["nama_hari"] = pd.Categorical(weekday["nama_hari"], categories=order, ordered=True)
+
+        order = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday"
+        ]
+
+        weekday["nama_hari"] = pd.Categorical(
+            weekday["nama_hari"],
+            categories=order,
+            ordered=True
+        )
+
         weekday = weekday.sort_values("nama_hari")
 
         fig_weekday = px.bar(
             weekday,
             x="nama_hari",
             y="revenue",
-            title="Revenue Berdasarkan Hari"
+            title="Revenue Berdasarkan Hari",
+            hover_data=["transaksi"]
         )
+
+        fig_weekday.update_layout(
+            xaxis_title="Hari",
+            yaxis_title="Revenue"
+        )
+
         st.plotly_chart(fig_weekday, use_container_width=True)
 
     with col_b:
         st.subheader("Distribusi Nilai Transaksi")
+
         fig_hist = px.histogram(
             trx,
             x="basket_value",
             nbins=30,
             title="Distribusi Basket Value"
         )
+
+        fig_hist.update_layout(
+            xaxis_title="Nilai Transaksi",
+            yaxis_title="Jumlah Transaksi"
+        )
+
         st.plotly_chart(fig_hist, use_container_width=True)
 
+# =========================
+# TAB 2: PRODUK
+# =========================
 with tab2:
     st.subheader("Top Produk Berdasarkan Revenue")
 
-    top_n = st.slider("Jumlah produk yang ditampilkan", 5, 30, 15)
+    top_n = st.slider(
+        "Jumlah produk yang ditampilkan",
+        min_value=5,
+        max_value=30,
+        value=15
+    )
 
     fig_top = px.bar(
         top_produk.head(top_n).sort_values("revenue"),
@@ -155,16 +301,32 @@ with tab2:
         title=f"Top {top_n} Produk Berdasarkan Revenue",
         hover_data=["qty", "transaksi", "harga_rata2"]
     )
+
+    fig_top.update_layout(
+        xaxis_title="Revenue",
+        yaxis_title="Produk"
+    )
+
     st.plotly_chart(fig_top, use_container_width=True)
 
     st.subheader("Tabel Ringkasan Produk")
-    st.dataframe(top_produk, use_container_width=True)
 
+    tabel_produk = top_produk.copy()
+    tabel_produk["revenue"] = tabel_produk["revenue"].apply(rupiah)
+    tabel_produk["harga_rata2"] = tabel_produk["harga_rata2"].apply(rupiah)
+
+    st.dataframe(tabel_produk, use_container_width=True)
+
+# =========================
+# TAB 3: PARETO & MATRIX
+# =========================
 with tab3:
     st.subheader("Pareto Product Intelligence")
 
     pareto = top_produk.copy()
-    pareto["cum_revenue_pct"] = pareto["revenue"].cumsum() / pareto["revenue"].sum() * 100
+    pareto["cum_revenue_pct"] = (
+        pareto["revenue"].cumsum() / pareto["revenue"].sum() * 100
+    )
 
     fig_pareto = px.bar(
         pareto.head(25),
@@ -173,10 +335,17 @@ with tab3:
         title="Pareto Produk Berdasarkan Revenue",
         hover_data=["cum_revenue_pct", "qty"]
     )
-    fig_pareto.update_layout(xaxis_tickangle=-45)
+
+    fig_pareto.update_layout(
+        xaxis_title="Produk",
+        yaxis_title="Revenue",
+        xaxis_tickangle=-45
+    )
+
     st.plotly_chart(fig_pareto, use_container_width=True)
 
     st.subheader("Product Role Matrix")
+
     fig_matrix = px.scatter(
         top_produk,
         x="qty",
@@ -186,33 +355,52 @@ with tab3:
         hover_data=["harga_rata2"],
         title="Product Role Matrix: Quantity vs Revenue"
     )
+
+    fig_matrix.update_layout(
+        xaxis_title="Quantity Terjual",
+        yaxis_title="Revenue"
+    )
+
     st.plotly_chart(fig_matrix, use_container_width=True)
 
     st.info(
         "Interpretasi: produk di kanan berarti volume tinggi, produk di atas berarti revenue tinggi, "
-        "dan bubble besar berarti sering muncul dalam transaksi."
+        "dan bubble besar berarti produk sering muncul dalam transaksi."
     )
 
+# =========================
+# TAB 4: MARKET BASKET
+# =========================
 with tab4:
     st.subheader("Market Basket Analysis")
 
     basket = df.groupby("nomor_struk")["nama_produk"].apply(lambda x: sorted(set(x)))
 
     pair_counter = Counter()
+
     for items in basket:
-        for pair in combinations(items, 2):
-            pair_counter[pair] += 1
+        if len(items) >= 2:
+            for pair in combinations(items, 2):
+                pair_counter[pair] += 1
 
     pairs = pd.DataFrame([
-        {"produk_a": a, "produk_b": b, "frekuensi": c}
+        {
+            "produk_a": a,
+            "produk_b": b,
+            "frekuensi": c
+        }
         for (a, b), c in pair_counter.items()
-    ]).sort_values("frekuensi", ascending=False)
+    ])
 
-    if len(pairs) == 0:
+    if pairs.empty:
         st.warning("Tidak ada pasangan produk yang dapat dihitung.")
     else:
+        pairs = pairs.sort_values("frekuensi", ascending=False)
+
         top_pairs = pairs.head(20).copy()
-        top_pairs["pasangan_produk"] = top_pairs["produk_a"] + " + " + top_pairs["produk_b"]
+        top_pairs["pasangan_produk"] = (
+            top_pairs["produk_a"] + " + " + top_pairs["produk_b"]
+        )
 
         fig_pairs = px.bar(
             top_pairs.sort_values("frekuensi"),
@@ -221,33 +409,52 @@ with tab4:
             orientation="h",
             title="Top 20 Produk yang Sering Dibeli Bersama"
         )
+
+        fig_pairs.update_layout(
+            xaxis_title="Frekuensi Dibeli Bersama",
+            yaxis_title="Pasangan Produk"
+        )
+
         st.plotly_chart(fig_pairs, use_container_width=True)
 
         st.subheader("Rekomendasi Bundling")
+
         best_pair = pairs.iloc[0]
+
         st.success(
-            f"Bundling paling potensial: {best_pair['produk_a']} + {best_pair['produk_b']} "
-            f"karena muncul bersama sebanyak {best_pair['frekuensi']} kali."
+            f"Bundling paling potensial: **{best_pair['produk_a']} + {best_pair['produk_b']}** "
+            f"karena muncul bersama sebanyak **{best_pair['frekuensi']} kali**."
         )
 
         st.dataframe(pairs.head(50), use_container_width=True)
 
+# =========================
+# KESIMPULAN OTOMATIS
+# =========================
 st.divider()
 st.subheader("Kesimpulan Otomatis")
 
 if len(top_produk) > 0:
     best_product = top_produk.iloc[0]
+
     st.write(
         f"Produk dengan kontribusi revenue tertinggi adalah **{best_product['nama_produk']}** "
-        f"dengan total revenue **Rp{best_product['revenue']:,.0f}** dan quantity terjual "
-        f"**{best_product['qty']:,.0f} unit**."
-        .replace(",", ".")
+        f"dengan total revenue **{rupiah(best_product['revenue'])}** dan quantity terjual "
+        f"**{best_product['qty']:,.0f} unit**.".replace(",", ".")
     )
 
 if len(daily) > 0:
     best_day = daily.sort_values("revenue", ascending=False).iloc[0]
+
     st.write(
         f"Hari dengan revenue tertinggi adalah **{best_day['tanggal'].date()}** "
-        f"dengan total revenue **Rp{best_day['revenue']:,.0f}**."
-        .replace(",", ".")
+        f"dengan total revenue **{rupiah(best_day['revenue'])}**."
     )
+
+# =========================
+# DEBUG INFO RINGAN
+# =========================
+with st.expander("Info Data"):
+    st.write("Jumlah baris data:", len(df))
+    st.write("Periode data:", f"{min_date} sampai {max_date}")
+    st.write("Kolom data:", list(df.columns))
