@@ -64,13 +64,22 @@ def load_data(uploaded_file=None):
     if missing_columns:
         raise ValueError(f"Kolom berikut tidak ditemukan: {missing_columns}")
 
-    # Konversi tanggal serial Excel menjadi tanggal normal
-    df["tanggal"] = pd.to_datetime(
-        df["tgl_transaksi"],
-        unit="D",
-        origin="1899-12-30",
-        errors="coerce"
-    )
+    # Konversi tanggal secara aman
+    # Jika tgl_transaksi sudah berupa tanggal, langsung dibaca sebagai datetime.
+    # Jika masih berupa angka serial Excel, baru dikonversi dengan origin Excel.
+    if pd.api.types.is_datetime64_any_dtype(df["tgl_transaksi"]):
+        df["tanggal"] = pd.to_datetime(df["tgl_transaksi"], errors="coerce")
+
+    elif pd.api.types.is_numeric_dtype(df["tgl_transaksi"]):
+        df["tanggal"] = pd.to_datetime(
+            df["tgl_transaksi"],
+            unit="D",
+            origin="1899-12-30",
+            errors="coerce"
+        )
+
+    else:
+        df["tanggal"] = pd.to_datetime(df["tgl_transaksi"], errors="coerce")
 
     # Hapus baris jika tanggal gagal terbaca
     df = df.dropna(subset=["tanggal"])
